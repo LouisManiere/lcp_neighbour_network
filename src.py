@@ -19,43 +19,62 @@ distance_threshold = 40000
 
 # input output variables
 # working folder
-wd_path = r"C:\Users\l.maniere\Documents\SIG\Reseaux\20210318_medieval_network"
+wd_path = r"C:\Users\l.maniere\Documents\SIG\spatial_analysis\network_analysis"
 
 # site layer
-path_sites = wd_path+r"\input\sites\20210325_network_sites.shp"
+path_sites = wd_path+r"\input\sites\roman_site_start.shp"
 
 # network layer
-path_network = wd_path+r"\postprocess_medieval_network.shp"
+path_network = wd_path+r"\input\networks\gis03_roman_camel_network.shp"
 
 # intermediate data
-# network
-path_output_network = wd_path+r"\neighbours_networks\intermediate_data\postprocess_medieval_network_neighbour_raw_2.shp"
-
-# network clean
-path_output_network_null = wd_path+r"\neighbours_networks\intermediate_data\postprocess_medieval_network_neighbour_null_2.shp"
 
 # network break intersection
-path_output_network_break = wd_path+r"\neighbours_networks\intermediate_data\postprocess_medieval_network_neighbour_null_break_2.shp"
+path_output_network_break = wd_path+r"\output\postprocess_network_neighbour_null_break.shp"
 
 # output
 # output network break intersection clean
-path_output_network_clean = wd_path+r"\neighbours_networks\output\postprocess_medieval_network_neighbour_2.shp"
+path_output_network_clean = wd_path+r"\output\postprocess_network_neighbour.shp"
 
 # import files
 sites=iface.addVectorLayer(path_sites,"","ogr")
 network = iface.addVectorLayer(path_network,"","ogr")
 
+# copy sites to memory layer
+sites.selectAll()
+sites_temp = processing.run("native:saveselectedfeatures", {'INPUT': sites, 'OUTPUT': 'memory:'})
+sites.removeSelection()
+
+# add new id field
+sites_temp['OUTPUT'].dataProvider().addAttributes([QgsField("_id_lcp",QVariant.Int)])
+sites_temp['OUTPUT'].updateFields()
+
+# generate id
+# get feature in the layer
+features=sites_temp['OUTPUT'].getFeatures()
+count=1
+id_index = sites_temp['OUTPUT'].dataProvider().fieldNameIndex('_id_lcp')
+# start editing
+sites_temp['OUTPUT'].startEditing()
+# iterate through each feature
+for feature  in features:
+    sites_temp['OUTPUT'].changeAttributeValue(feature.id(),id_index,count)
+    count += 1
+
+# apply change
+sites_temp['OUTPUT'].commitChanges()
+
 # extract max id value
-idx = sites.fields().indexFromName('id')
-max_id = sites.maximumValue(idx)
+idx = sites_temp['OUTPUT'].fields().indexFromName('_id_lcp')
+max_id = sites_temp['OUTPUT'].maximumValue(idx)
 
 # select by ID iteration
 for i in range(0, max_id):
     i=i+1
 #    sites.removeSelection()
     point_select = processing.run("qgis:extractbyattribute", 
-        {'INPUT':sites,
-        'FIELD': 'id',
+        {'INPUT':sites_temp['OUTPUT'],
+        'FIELD': '_id_lcp',
         'OPERATOR': 0,
         'VALUE': i,
         'OUTPUT': 'memory:'})
@@ -75,7 +94,7 @@ for i in range(0, max_id):
         'INPUT' : network, 
         'OUTPUT_LINES' : 'memory:', 
         'SPEED_FIELD' : None, 
-        'START_POINT' : str(x_coord)+','+str(y_coord)+' [EPSG:32636]', 
+        'START_POINT' : str(x_coord)+','+str(y_coord)+' ['+network.crs().authid()+']', 
         'STRATEGY' : 0, 
         'TOLERANCE' : 0, 
         'TRAVEL_COST' : distance_threshold, 
@@ -114,7 +133,7 @@ for i in range(0, max_id):
         'INPUT' : network, 
         'OUTPUT' : 'memory:', 
         'SPEED_FIELD' : None, 
-        'START_POINT' : str(x_coord)+','+str(y_coord)+' [EPSG:32636]', 
+        'START_POINT' : str(x_coord)+','+str(y_coord)+' ['+network.crs().authid()+']', 
         'STRATEGY' : 0, 
         'TOLERANCE' : 0, 
         'VALUE_BACKWARD' : '', 
@@ -124,41 +143,38 @@ for i in range(0, max_id):
     # output
     # write first iteration
     if i==1:
-        QgsVectorFileWriter.writeAsVectorFormat(
-            lcp['OUTPUT'],
-            path_output_network,"utf-8",
-            lcp['OUTPUT'].crs(),
-            "ESRI Shapefile")
+        lcp['OUTPUT'].selectAll()
+        raw_network = processing.run("native:saveselectedfeatures", {'INPUT': lcp['OUTPUT'], 'OUTPUT': 'memory:'})
+        lcp['OUTPUT'].removeSelection()
     else:
         processing.run("etl_load:appendfeaturestolayer", {
         'ACTION_ON_DUPLICATE' : 0, 
         'SOURCE_FIELD' : None, 
         'SOURCE_LAYER' : lcp['OUTPUT'], 
         'TARGET_FIELD' : None,
-        'TARGET_LAYER' : path_output_network})
+        'TARGET_LAYER' : raw_network['OUTPUT']})
     
 
 # delete feature with null geometry
 output_network_null = processing.run("qgis:removenullgeometries", { 
-    'INPUT' : path_output_network, 
-    'OUTPUT' : path_output_network_null})
-output_network_null = QgsVectorLayer(output_network_null['OUTPUT'], "output_network_null", "ogr")
+    'INPUT' : raw_network['OUTPUT'], 
+    'OUTPUT' : 'memory:'})
 
 # delete index field
 field_index_to_delete = []
 # Fieldnames to delete list ['column1','column2']
 fieldnames = set(['index'])
 # iterate through fields to get their idex if their are in Fieldnames to delete
-for field in output_network_null.fields():
+for field in output_network_null['OUTPUT'].fields():
     if field.name() in fieldnames:
-      field_index_to_delete.append(output_network_null.fields().indexFromName(field.name()))
+      field_index_to_delete.append(output_network_null['OUTPUT'].fields().indexFromName(field.name()))
 
 # Delete the fields in the attribute table through their corresponding index in the list.
-output_network_null.dataProvider().deleteAttributes(field_index_to_delete)
-output_network_null.updateFields()
+output_network_null['OUTPUT'].dataProvider().deleteAttributes(field_index_to_delete)
+output_network_null['OUTPUT'].updateFields()
 
 # break line to intersections
-service_clean = processing.run("grass7:v.clean",{
+processing.run("grass7:v.clean",{
     '-b' : False, 
     '-c' : False, 
     'GRASS_MIN_AREA_PARAMETER' : 0.0001, 
@@ -169,14 +185,13 @@ service_clean = processing.run("grass7:v.clean",{
     'GRASS_VECTOR_EXPORT_NOCAT' : False, 
     'GRASS_VECTOR_LCO' : '', 
     'error' : 'memory:', 
-    'input' : path_output_network_null, 
+    'input' : output_network_null['OUTPUT'], 
     'output' : path_output_network_break, 
     'threshold' : '', 
     'tool' : [0], 
     'type' : [0,1,2,3,4,5,6] })
 
 # remove duplicate geometry
-processing.run("qgis:deleteduplicategeometries",{
+output_network_clean = processing.run("qgis:deleteduplicategeometries",{
     'INPUT' : path_output_network_break, 
     'OUTPUT' : path_output_network_clean })
-
